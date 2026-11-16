@@ -3136,5 +3136,269 @@ function boot() { load(); applyTheme(); pickVoice(); indexQuestions(); shell(); 
 boot();
 
 </script>
+<!-- ===== google-login: optional Google sign-in + cloud sync (self-contained block, start) ===== -->
+<style id="eh-cloud-css">
+.eh-acc{display:flex;flex-direction:column;gap:8px;padding:12px 8px 4px;border-top:1px solid var(--line);margin-top:10px}
+.eh-gbtn{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:44px;padding:8px 16px;border-radius:14px;border:1.5px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:700;cursor:pointer;transition:background .15s}
+.eh-gbtn:hover{background:var(--card2)}.eh-gbtn:active{transform:scale(.97)}.eh-gbtn[disabled]{opacity:.5;pointer-events:none}
+.eh-gbtn svg{width:20px;height:20px;flex:none}
+.eh-user{display:flex;align-items:center;gap:10px;min-width:0}
+.eh-user img,.eh-av{width:36px;height:36px;border-radius:50%;flex:none;object-fit:cover;background:var(--p-soft);color:var(--p);display:grid;place-items:center;font-weight:900}
+.eh-user b{display:block;font-size:.9rem;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.eh-user span{display:block;font-size:.74rem;color:var(--mut);direction:ltr;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.eh-st{font-size:.78rem;color:var(--mut);display:flex;align-items:center;gap:6px}
+.eh-st::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--mut);flex:none}
+.eh-st.ok::before{background:var(--g)}.eh-st.busy::before{background:var(--c1)}.eh-st.bad::before{background:var(--bad)}
+.eh-out{background:none;border:0;padding:0;color:var(--p);font:inherit;font-size:.8rem;font-weight:700;cursor:pointer;align-self:flex-start}
+.eh-top{width:42px;height:42px;padding:0;border-radius:12px;border:1.5px solid var(--line);background:var(--card);display:inline-grid;place-items:center;cursor:pointer;overflow:hidden}
+.eh-top svg{width:22px;height:22px}.eh-top img{width:100%;height:100%;object-fit:cover}
+.eh-card{margin-bottom:16px}
+.eh-cmp{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.eh-cmp>div{border:1.5px solid var(--line);border-radius:14px;padding:10px 12px;font-size:.9rem}
+.eh-cmp b{display:block;margin-bottom:4px}
+.eh-acc[hidden],.eh-top[hidden],.eh-st[hidden]{display:none!important}
+.eh-acc .eh-gbtn{font-size:.84rem;padding:8px 10px;gap:8px;white-space:nowrap}
+</style>
+<script id="eh-cloud">
+/* Optional Google sign-in + Firestore sync of localStorage['elh.v1'].
+   localStorage stays the source of truth; the app works unchanged if signed out or if Firebase fails to load. */
+(function () {
+  'use strict';
+  var FB_VER = '10.14.1';
+  var firebaseConfig = {
+    apiKey: "AIzaSyC1LssgYacAtme47-uC0LApEwNeNpD8zYs",
+    authDomain: "english-hub-1d37b.firebaseapp.com",
+    projectId: "english-hub-1d37b",
+    storageBucket: "english-hub-1d37b.firebasestorage.app",
+    messagingSenderId: "302403733223",
+    appId: "1:302403733223:web:967f34fbaf964196eb0442"
+  };
+  var KEY = 'elh.v1', META = 'elh.cloud', BAK = 'elh.v1.bak', MAX_BYTES = 950000, DEBOUNCE = 3000;
+  var UA = navigator.userAgent || '';
+  var IN_APP = /Instagram|FBAN|FBAV|FB_IAB|FBIOS|Twitter|musical_ly|Bytedance|TikTok|Snapchat|Line\/|LinkedInApp|; wv\)/i.test(UA);
+  var G_SVG = '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+
+  var fb = null, loading = null, user = null, ready = false, failed = false;
+  var status = { cls: '', txt: '' }, upT = 0, syncing = false, blockedUpload = false, reconciled = false, pending = false;
+
+  /* ---------- helpers ---------- */
+  var h = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var rawSet = Storage.prototype.setItem;
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { rawSet.call(localStorage, k, v); } catch (e) {} }
+  function meta() { try { return JSON.parse(lsGet(META) || '{}') || {}; } catch (e) { return {}; } }
+  function setMeta(m) { lsSet(META, JSON.stringify(m)); }
+  function hash(str) { var x = 5381; str = str || ''; for (var i = 0; i < str.length; i++) x = ((x * 33) ^ str.charCodeAt(i)) >>> 0; return x.toString(36) + ':' + str.length; }
+  function parse(str) { try { var d = JSON.parse(str); return d && typeof d === 'object' ? d : null; } catch (e) { return null; } }
+  function prog(d) { if (!d) return { xp: 0, done: 0, tests: 0, score: 0 }; var xp = +d.xp || 0, done = d.done ? Object.keys(d.done).length : 0, tests = (d.tests || []).length + (d.placement ? 1 : 0); return { xp: xp, done: done, tests: tests, score: xp + done * 20 + tests * 10 }; }
+  function dominates(a, b) { return a.xp >= b.xp && a.done >= b.done && a.tests >= b.tests; }
+  function fmtTime(ms) { try { return new Date(ms).toLocaleString('ar-SA-u-nu-latn', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }); } catch (e) { return ''; } }
+  function say(msg, icon) { try { toast(msg, icon || 'check'); } catch (e) {} }
+  function setStatus(cls, txt) { status = { cls: cls, txt: txt }; document.querySelectorAll('[data-eh-st]').forEach(function (el) { el.className = 'eh-st ' + cls; el.textContent = txt || (user ? 'متصل بحسابك' : ''); el.hidden = !el.textContent; }); }
+
+  /* ---------- watch the app's own saves (app calls localStorage.setItem('elh.v1', ...)) ---------- */
+  Storage.prototype.setItem = function (k, v) {
+    rawSet.call(this, k, v);
+    if (k === KEY && this === window.localStorage) {
+      var m = meta();
+      if (hash(String(v)) !== m.hash) { m.dirty = true; m.mt = Date.now(); setMeta(m); if (user) scheduleUpload(); }
+    }
+  };
+
+  /* ---------- lazy-load Firebase (ESM from gstatic, after first paint) ---------- */
+  function loadFb() {
+    if (loading) return loading;
+    var base = 'https://www.gstatic.com/firebasejs/' + FB_VER + '/';
+    loading = Promise.all([import(base + 'firebase-app.js'), import(base + 'firebase-auth.js'), import(base + 'firebase-firestore.js')]).then(function (m) {
+      var app = m[0].initializeApp(firebaseConfig);
+      var auth = m[1].getAuth(app); auth.languageCode = 'ar';
+      var db;
+      try { db = m[2].initializeFirestore(app, { ignoreUndefinedProperties: true }); } catch (e) { db = m[2].getFirestore(app); }
+      fb = { A: m[1], F: m[2], auth: auth, db: db };
+      if (sessionStorage.getItem('eh.redirect')) { sessionStorage.removeItem('eh.redirect'); m[1].getRedirectResult(auth).catch(function (e) { authError(e); }); }
+      m[1].onAuthStateChanged(auth, function (u) { ready = true; onUser(u); });
+      return fb;
+    }).catch(function (e) {
+      failed = true; loading = null; console.warn('[eh-cloud] Firebase unavailable', e && e.message);
+      renderAll(); throw e;
+    });
+    return loading;
+  }
+
+  /* ---------- auth ---------- */
+  function provider() { var p = new fb.A.GoogleAuthProvider(); p.setCustomParameters({ prompt: 'select_account' }); return p; }
+  function signIn() {
+    if (IN_APP) return inAppGuide();
+    var go = function () {
+      return fb.A.signInWithPopup(fb.auth, provider()).catch(function (e) {
+        var c = e && e.code || '';
+        if (c === 'auth/popup-blocked' || c === 'auth/operation-not-supported-in-this-environment' || c === 'auth/web-storage-unsupported') {
+          sessionStorage.setItem('eh.redirect', '1'); return fb.A.signInWithRedirect(fb.auth, provider());
+        }
+        throw e;
+      }).catch(authError);
+    };
+    if (fb) return go(); /* keep the popup inside the click's user activation */
+    setStatus('busy', 'جارٍ تجهيز الدخول…');
+    return loadFb().then(go, function () { say('تعذّر تحميل خدمة الدخول — تأكد من الاتصال', 'cross'); });
+  }
+  function authError(e) {
+    var c = e && e.code || '';
+    if (c === 'auth/popup-closed-by-user' || c === 'auth/cancelled-popup-request' || c === 'auth/user-cancelled') { setStatus('', ''); renderAll(); return; }
+    console.warn('[eh-cloud] auth', c, e && e.message);
+    if (/disallowed|web-storage|operation-not-supported/.test(c + (e && e.message))) return inAppGuide();
+    if (c === 'auth/network-request-failed') say('لا يوجد اتصال بالإنترنت', 'cross');
+    else if (c === 'auth/unauthorized-domain') say('هذا الرابط غير مفعّل لتسجيل الدخول', 'cross');
+    else say('تعذّر تسجيل الدخول، حاول مرة ثانية', 'cross');
+    renderAll();
+  }
+  function signOut() {
+    if (!fb) return;
+    var go = function () { flush().then(function () { return fb.A.signOut(fb.auth); }).then(function () { var m = meta(); delete m.uid; setMeta(m); say('تم تسجيل الخروج — تقدّمك باقٍ على هذا الجهاز', 'check'); }); };
+    var m = modal('<h3>تسجيل الخروج؟</h3><p>تقدّمك يبقى محفوظ على هذا الجهاز وفي حسابك.</p><div class="row"><button class="btn pri" id="ehso">تسجيل الخروج</button><button class="btn" data-close>إلغاء</button></div>');
+    m.querySelector('#ehso').onclick = function () { m.close(); go(); };
+  }
+  function inAppGuide() {
+    var url = location.href.split('#')[0];
+    var m = modal('<h3>افتح الرابط في المتصفح</h3><p>افتح الرابط في Safari أو Chrome عشان تقدر تسجّل دخول.</p><p class="small ink2">متصفح التطبيق (مثل X أو إنستقرام) ما يسمح بالدخول بحساب Google. اضغط ⋯ أو زر المشاركة ثم «فتح في المتصفح»، أو انسخ الرابط والصقه في Safari أو Chrome.</p><div class="row"><button class="btn pri" id="ehcp">انسخ الرابط</button><button class="btn" data-close>حسنًا</button></div>');
+    m.querySelector('#ehcp').onclick = function () {
+      var done = function () { say('نُسخ الرابط', 'check'); };
+      try { navigator.clipboard.writeText(url).then(done, function () { prompt('انسخ الرابط:', url); }); } catch (e) { prompt('انسخ الرابط:', url); }
+    };
+    return Promise.resolve();
+  }
+
+  /* ---------- sync ---------- */
+  function ref() { return fb.F.doc(fb.db, 'users', user.uid); }
+  function applyLocal(str) {
+    var cur = lsGet(KEY); if (cur && cur !== str) lsSet(BAK, cur); /* keep a safety copy of what we replace */
+    var d = parse(str); if (!d) return;
+    try {
+      S = Object.assign(defState(), d); S.profile = Object.assign(defState().profile, S.profile || {});
+      lsSet(KEY, JSON.stringify(S)); applyTheme(); shell(); route();
+    } catch (e) { lsSet(KEY, str); location.reload(); }
+  }
+  function markSynced(str, cu) { var m = meta(); m.uid = user.uid; m.hash = hash(str); m.syncedAt = cu; m.dirty = false; m.p = prog(parse(str)).score; setMeta(m); }
+  function upload(force) {
+    if (!user || !fb) return Promise.resolve();
+    var str = lsGet(KEY); if (!str) return Promise.resolve();
+    var m = meta();
+    if (!force && (!reconciled || pending)) return Promise.resolve(); /* wait until the first reconcile/decision */
+    if (!force && !m.dirty && m.uid === user.uid) return Promise.resolve();
+    var bytes = new Blob([str]).size;
+    if (bytes > MAX_BYTES) { setStatus('bad', 'حجم البيانات أكبر من حد المزامنة — احتفظ بنسخة احتياطية'); return Promise.resolve(); }
+    /* never silently push LESS progress over the account copy (e.g. after "مسح كل بياناتي") */
+    if (!force && m.uid === user.uid && typeof m.p === 'number' && prog(parse(str)).score < m.p) { if (!blockedUpload) { blockedUpload = true; askLess(); } return Promise.resolve(); }
+    var cu = Date.now(); setStatus('busy', 'جارٍ الحفظ في حسابك…');
+    return fb.F.setDoc(ref(), { data: str, updatedAt: fb.F.serverTimestamp(), clientUpdatedAt: cu, v: 1 }).then(function () {
+      if (lsGet(KEY) === str) markSynced(str, cu); else { var mm = meta(); mm.syncedAt = cu; mm.p = prog(parse(str)).score; setMeta(mm); scheduleUpload(); }
+      setStatus('ok', 'تم الحفظ في حسابك · ' + fmtTime(cu));
+    }).catch(function (e) {
+      console.warn('[eh-cloud] save', e && e.code); setStatus('bad', navigator.onLine === false ? 'غير متصل — بيُحفظ لما يرجع الاتصال' : 'تعذّر الحفظ في حسابك — بنحاول لاحقًا');
+      clearTimeout(upT); upT = setTimeout(upload, 30000);
+    });
+  }
+  function scheduleUpload() { clearTimeout(upT); upT = setTimeout(upload, DEBOUNCE); }
+  function flush() { clearTimeout(upT); return user ? upload() : Promise.resolve(); }
+  window.addEventListener('online', function () { if (user) scheduleUpload(); });
+  document.addEventListener('visibilitychange', function () { if (document.hidden && user && meta().dirty) setTimeout(upload, 400); /* app saves on hide first */ });
+
+  function askLess() {
+    var md = modal('<h3>تقدّمك هنا أقل من حسابك</h3><p>تقدّمك على هذا الجهاز صار أقل من النسخة المحفوظة في حسابك (مثلًا بعد مسح البيانات). وش تبي؟</p><div class="row"><button class="btn pri" id="ehkeep">استرجع تقدّمي من الحساب</button><button class="btn" id="ehrep" style="color:var(--bad)">استبدل نسخة الحساب</button></div>');
+    md.querySelector('#ehkeep').onclick = function () { md.close(); blockedUpload = false; reconcile(true); };
+    md.querySelector('#ehrep').onclick = function () { md.close(); blockedUpload = false; upload(true); };
+  }
+  function askConflict(localStr, cloudStr, cloudCu) {
+    var L = prog(parse(localStr)), C = prog(parse(cloudStr));
+    var box = function (t, p) { return '<div><b>' + t + '</b>' + p.done + ' نشاط مكتمل<br>' + p.xp + ' نقطة XP</div>'; };
+    var md = modal('<h3>أي تقدّم نعتمد؟</h3><p>لقينا تقدّم مختلف في حسابك وعلى هذا الجهاز.</p><div class="eh-cmp">' + box('هذا الجهاز', L) + box('حسابك (' + fmtTime(cloudCu) + ')', C) + '</div><p class="small ink2">نحتفظ بنسخة احتياطية من الثاني على هذا الجهاز.</p><div class="row"><button class="btn ' + (C.score >= L.score ? 'pri' : '') + '" id="ehc">اعتمد حسابي</button><button class="btn ' + (C.score < L.score ? 'pri' : '') + '" id="ehl">اعتمد هذا الجهاز</button></div>');
+    md.querySelector('#ehc').onclick = function () { md.close(); pending = false; applyLocal(cloudStr); markSynced(lsGet(KEY) || cloudStr, cloudCu); setStatus('ok', 'تم تحميل تقدّمك من حسابك'); };
+    md.querySelector('#ehl').onclick = function () { md.close(); pending = false; upload(true); };
+  }
+  function reconcile(preferCloud) {
+    if (!user) return Promise.resolve();
+    syncing = true; setStatus('busy', 'جارٍ المزامنة…');
+    return fb.F.getDoc(ref()).then(function (snap) {
+      var m = meta(), localStr = lsGet(KEY), cloud = snap.exists() ? snap.data() : null;
+      var cloudStr = cloud ? (typeof cloud.data === 'string' ? cloud.data : JSON.stringify(cloud.data || null)) : null;
+      var cloudCu = cloud && +cloud.clientUpdatedAt || 0;
+      var L = prog(parse(localStr)), C = prog(parse(cloudStr));
+      if (!cloudStr || !parse(cloudStr)) return upload(true);                       /* nothing in the account yet */
+      if (preferCloud || !localStr || L.score === 0) { applyLocal(cloudStr); markSynced(lsGet(KEY) || cloudStr, cloudCu); setStatus('ok', 'تم تحميل تقدّمك من حسابك'); if (L.score > 0 || preferCloud) say('رجع تقدّمك من حسابك 👌', 'check'); return; }
+      if (localStr === cloudStr) { markSynced(localStr, cloudCu); setStatus('ok', 'تم الحفظ في حسابك'); return; }
+      var same = m.uid === user.uid, cloudChanged = !same || cloudCu > (m.syncedAt || 0), localChanged = !same || !!m.dirty;
+      if (!cloudChanged) return upload(true);                                       /* only this device changed */
+      if (!localChanged) { applyLocal(cloudStr); markSynced(lsGet(KEY) || cloudStr, cloudCu); setStatus('ok', 'تم تحميل آخر تقدّم من حسابك'); return; }
+      /* both changed: take the one that has at least as much progress in every measure, otherwise ask */
+      if (dominates(C, L)) { applyLocal(cloudStr); markSynced(lsGet(KEY) || cloudStr, cloudCu); setStatus('ok', 'تم تحميل تقدّمك من حسابك'); return; }
+      if (dominates(L, C)) return upload(true);
+      pending = true; setStatus('busy', 'بانتظار اختيارك…'); askConflict(localStr, cloudStr, cloudCu);
+    }).catch(function (e) {
+      console.warn('[eh-cloud] read', e && e.code); setStatus('bad', 'تعذّرت المزامنة — تقدّمك محفوظ على الجهاز');
+    }).then(function () { syncing = false; reconciled = true; if (!pending && meta().dirty) scheduleUpload(); });
+  }
+  function onUser(u) {
+    var prev = user; user = u || null; renderAll();
+    if (user && (!prev || prev.uid !== user.uid)) { reconciled = false; pending = false; reconcile(false); }
+    if (!user) { clearTimeout(upT); setStatus('', ''); }
+  }
+
+  /* ---------- UI ---------- */
+  function avatar(cls) { return user && user.photoURL ? '<img src="' + h(user.photoURL) + '" alt="" referrerpolicy="no-referrer"' + (cls ? ' class="' + cls + '"' : '') + '>' : '<span class="eh-av">' + h(((user && (user.displayName || user.email)) || '؟').trim().charAt(0)) + '</span>'; }
+  function accHTML() {
+    if (failed && !user) return '<div class="eh-st bad">خدمة الدخول غير متاحة الآن — المنصة تشتغل عادي</div>';
+    if (!user) return '<button class="eh-gbtn" data-eh-in type="button">' + G_SVG + '<span>الدخول بحساب Google</span></button><div class="tiny mut">اختياري: يحفظ تقدّمك في حسابك عشان ما يضيع لو غيّرت جهازك.</div><div class="eh-st ' + status.cls + '" data-eh-st' + (status.txt ? '' : ' hidden') + '>' + h(status.txt) + '</div>';
+    return '<div class="eh-user">' + avatar() + '<div style="min-width:0"><b>' + h(user.displayName || 'حسابي') + '</b><span>' + h(user.email || '') + '</span></div></div><div class="eh-st ' + status.cls + '" data-eh-st>' + h(status.txt || 'متصل بحسابك') + '</div><button class="eh-out" data-eh-out type="button">تسجيل الخروج</button>';
+  }
+  function renderAll() {
+    var side = document.querySelector('.side');
+    if (side) {
+      var acc = side.querySelector('#ehAcc');
+      if (!acc) { acc = document.createElement('div'); acc.id = 'ehAcc'; acc.className = 'eh-acc'; side.appendChild(acc); }
+      acc.innerHTML = accHTML();
+      var foot = side.querySelector('.side-foot'); if (foot && foot.firstChild && foot.firstChild.nodeType === 3) foot.firstChild.textContent = user ? 'بياناتك محفوظة على جهازك وفي حسابك.' : 'بياناتك محفوظة على جهازك فقط.';
+    }
+    var tb = document.querySelector('.topbar');
+    if (tb) {
+      var b = tb.querySelector('#ehTop');
+      if (!b) { b = document.createElement('button'); b.id = 'ehTop'; b.className = 'eh-top'; b.type = 'button'; var thm = tb.querySelector('#thm'); tb.insertBefore(b, thm || null); }
+      b.hidden = failed && !user; b.innerHTML = user ? avatar() : G_SVG; b.setAttribute('aria-label', user ? 'حسابي' : 'الدخول بحساب Google'); b.title = b.getAttribute('aria-label');
+    }
+    var card = document.getElementById('ehCard'); if (card) card.querySelector('[data-eh-body]').innerHTML = accHTML();
+    document.querySelectorAll('[data-eh-st]').forEach(function (el) { if (!el.textContent) el.hidden = true; });
+  }
+  function accountSheet() {
+    if (!user) return signIn();
+    var m = modal('<h3>حسابي</h3><div class="col" style="gap:10px">' + accHTML() + '</div><div class="row" style="margin-top:14px"><button class="btn" data-close>إغلاق</button></div>');
+    m.addEventListener('click', function (e) { if (e.target.closest('[data-eh-out]')) m.close(); });
+  }
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('[data-eh-in]')) { e.preventDefault(); signIn(); }
+    else if (e.target.closest('[data-eh-out]')) { e.preventDefault(); signOut(); }
+    else if (e.target.closest('#ehTop')) { e.preventDefault(); accountSheet(); }
+  });
+
+  /* hook the app's shell() and Settings view without editing them */
+  try {
+    var _shell = shell; shell = function () { var r = _shell.apply(this, arguments); renderAll(); return r; };
+    var _prefs = viewPrefs;
+    var prefs2 = function (v) {
+      var r = _prefs.apply(this, arguments);
+      var c = document.createElement('div'); c.id = 'ehCard'; c.className = 'card col eh-card';
+      c.innerHTML = '<h3 style="margin:0">حسابي والمزامنة</h3><div class="col" style="gap:10px" data-eh-body></div>';
+      var head = v.querySelector('.page-head'); if (head && head.nextSibling) v.insertBefore(c, head.nextSibling); else v.prepend(c);
+      renderAll(); return r;
+    };
+    viewPrefs = prefs2; if (typeof VIEWS !== 'undefined') VIEWS.prefs = prefs2; if (typeof MORE_VIEWS !== 'undefined') MORE_VIEWS.prefs = prefs2;
+    renderAll(); if ((location.hash || '').replace('#', '').split('-')[0] === 'prefs') route();
+  } catch (e) { console.warn('[eh-cloud] ui hook', e); }
+
+  /* load the SDK when idle, after first paint (sooner if this device was signed in before) */
+  var kick = function () { loadFb().catch(function () {}); };
+  var idle = window.requestIdleCallback || function (f) { return setTimeout(f, 1200); };
+  if (document.readyState === 'complete') idle(kick, { timeout: 3000 }); else window.addEventListener('load', function () { idle(kick, { timeout: 3000 }); });
+})();
+</script>
+<!-- ===== google-login (end) ===== -->
 </body>
 </html>
