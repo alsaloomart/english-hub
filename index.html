@@ -631,6 +631,12 @@ mark.hlw{background:var(--g-soft);color:var(--g);padding:0 4px;border-radius:5px
 .sec-div .home-h small{font-size:1rem;font-weight:400;color:#6b7785;background:none;padding:0}
 .sec-div .home-h small::before{content:"\"" }.sec-div .home-h small::after{content:"\""}
 
+
+/* ===== TILE-FIX (branch fix-audio): «اختبار تحديد المستوى» fits on one line; English label stays one line under it ===== */
+.tile[data-h="placement"] .tl-foot{container-type:inline-size}
+.tile[data-h="placement"] .tl-foot>div:first-child>p b{white-space:nowrap;letter-spacing:-.2px;font-size:min(1.32rem,calc(100cqi / 9.4));line-height:calc(1.32rem * 1.35)}
+.tile:not(.pos) .tl-foot>div:first-child>h3{white-space:nowrap}
+/* ===== TILE-FIX END ===== */
 </style>
 </head>
 <body>
