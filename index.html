@@ -733,34 +733,100 @@ const mastered = () => Object.keys(S.srs).filter(k => k[0] === 'w' && S.srs[k].b
 const hardKeys = () => Object.keys(S.srs).filter(k => S.srs[k].l >= 2 || (S.srs[k].r >= 2 && S.srs[k].b <= 1));
 
 /* ---------- audio (Web Speech, with graceful fallback) ---------- */
-const TTS = { ok: 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined', voice: null };
+/* ===== AUDIO-FIX BEGIN (branch fix-audio) =====
+   Why: users reported "الصوت ما يشتغل". Old code (a) called speechSynthesis.speak() inside setTimeout(…,30)
+   which drops the user-gesture on iPhone Safari, (b) treated onerror like onend so failures were silent,
+   (c) never noticed when speak() did nothing (Android in-app WebViews: Instagram/TikTok/Snapchat/X),
+   (d) relied only on onvoiceschanged (Safari often never fires it), (e) sent long texts as one utterance
+   (Chrome cuts them after ~15s). This block keeps the same public API: TTS, pickVoice, speak, stopSpeak, SR, sayBtn. */
+const TTS = { ok: 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined', voice: null, exact: false, started: false };
+const AUD_UA = navigator.userAgent || '';
+const AUD_IOS = /iP(hone|ad|od)/.test(AUD_UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const AUD_INAPP = /FBAN|FBAV|FB_IAB|Instagram|Snapchat|TikTok|musical_ly|BytedanceWebview|Twitter|Line\/|GSA\/|; wv\)/i.test(AUD_UA);
 const VOICE_M = /david|mark|daniel|alex|fred|george|guy|ryan|james|thomas|oliver|arthur|rishi|aaron|liam|eric|roger|brian|christopher|davis|tony|male/i, VOICE_F = /samantha|zira|aria|jenny|karen|moira|susan|hazel|libby|sonia|victoria|tessa|ava|emma|michelle|serena|allison|kate|female/i;
-function englishVoices() { return TTS.ok ? speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)) : []; }
+function englishVoices() { if (!TTS.ok) return []; try { return speechSynthesis.getVoices().filter(v => /^en([-_]|$)/i.test(v.lang || '')); } catch (e) { return []; } }
 function pickVoice() {
   if (!TTS.ok) return; const vs = englishVoices(), g = (typeof S !== 'undefined' && S.profile && S.profile.voice) || 'male', nm = typeof S !== 'undefined' && S.profile && S.profile.voiceName;
   const rx = g === 'male' ? VOICE_M : VOICE_F, other = g === 'male' ? VOICE_F : VOICE_M;
   const byName = nm && vs.find(v => v.name === nm);
-  const pref = v => (/^en[-_](US|GB)/i.test(v.lang) ? 2 : 0) + (/google|natural|online/i.test(v.name) ? 1 : 0);
+  const pref = v => (/^en[-_](US|GB)/i.test(v.lang) ? 2 : 0) + (/google|natural|online/i.test(v.name) ? 1 : 0) + (v.localService ? 1 : 0);
   const match = vs.filter(v => rx.test(v.name) && !other.test(v.name)).sort((a, b) => pref(b) - pref(a))[0];
+  // fallback chain: chosen name → gender match → any en-US → any English → null (then only u.lang is set; the OS picks a voice)
   TTS.voice = byName || match || vs.find(v => /^en[-_]US/i.test(v.lang)) || vs[0] || null;
   TTS.exact = !!(byName || match);
 }
-if (TTS.ok) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-let speakTok = 0;
+if (TTS.ok) {
+  pickVoice();
+  try { speechSynthesis.addEventListener ? speechSynthesis.addEventListener('voiceschanged', pickVoice) : (speechSynthesis.onvoiceschanged = pickVoice); } catch (e) { speechSynthesis.onvoiceschanged = pickVoice; }
+  // Safari/iOS often never fires voiceschanged: poll briefly until voices appear
+  let n = 0; const iv = setInterval(() => { if (englishVoices().length || ++n > 20) { clearInterval(iv); pickVoice(); } }, 250);
+}
+/* One clear Arabic help message instead of silent failure (shown at most once per page load per reason) */
+const audioShown = {};
+function audioHelp(reason) {
+  const tip = AUD_IOS ? '<li>في الآيفون: تأكد أن زر الصامت (على جنب الجوال) مو مفعّل، وارفع الصوت من أزرار الجانب.</li>' : '<li>ارفع صوت الوسائط في الجوال.</li>';
+  const open = '<li>إذا فتحت الرابط من داخل تطبيق (إكس، إنستقرام، سناب، تيك توك): اضغط ⋯ واختر «فتح في المتصفح»، أو انسخ الرابط وافتحه في <b>Safari</b> أو <b>Chrome</b>.</li>';
+  const head = reason === 'unsupported' ? 'هذا المتصفح ما يدعم تشغيل الصوت.'
+    : reason === 'inapp' ? 'يبدو أنك فاتح المنصة من داخل تطبيق، والصوت غالبًا ما يشتغل فيه.'
+    : reason === 'mic' ? 'تعذّر تشغيل الميكروفون.' : 'ما قدرنا نشغّل الصوت.';
+  if (audioShown[reason]) { toast(head + ' افتح الرابط في Safari أو Chrome', reason === 'mic' ? 'mic' : 'speak'); return; }
+  audioShown[reason] = 1;
+  const m = modal(`<h3>${head}</h3><ul style="line-height:1.9;padding-inline-start:18px;margin:8px 0">${open}${reason === 'mic' ? '<li>اسمح للمتصفح باستخدام الميكروفون، وتأكد إن الإنترنت شغال.</li>' : tip}</ul><div class="row"><button class="btn" id="audcp">نسخ الرابط</button><button class="btn pri" data-close>تمام</button></div>`);
+  const cp = m.querySelector('#audcp'); cp && (cp.onclick = () => { const u = location.href.split('#')[0]; try { navigator.clipboard.writeText(u).then(() => toast('نُسخ الرابط — الصقه في Safari أو Chrome', 'check'), () => prompt('انسخ الرابط:', u)); } catch (e) { prompt('انسخ الرابط:', u); } });
+}
+/* iOS needs the first utterance inside a real tap: speak a silent one on the first touch so later auto-plays work */
+if (TTS.ok && AUD_IOS) {
+  const unlock = () => { document.removeEventListener('touchend', unlock, true); document.removeEventListener('click', unlock, true); try { if (!speechSynthesis.speaking) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } } catch (e) {} };
+  document.addEventListener('touchend', unlock, true); document.addEventListener('click', unlock, true);
+}
+/* split long text into sentence chunks (<=200 chars) — Chrome stops long utterances after ~15s */
+function ttsChunks(text) {
+  const parts = String(text).replace(/\s+/g, ' ').trim().match(/[^.!?;:]+[.!?;:]*\s*/g) || [String(text)]; const out = []; let cur = '';
+  parts.forEach(p => { if ((cur + p).length > 200 && cur) { out.push(cur.trim()); cur = ''; } while (p.length > 200) { const k = p.lastIndexOf(' ', 200) > 50 ? p.lastIndexOf(' ', 200) : 200; out.push(p.slice(0, k).trim()); p = p.slice(k); } cur += p; });
+  if (cur.trim()) out.push(cur.trim()); return out.length ? out : [String(text)];
+}
+let speakTok = 0; const liveUtt = []; // keep references: Chrome garbage-collects utterances and then onend never fires
 function speak(text, o = {}) {
-  if (!TTS.ok) { toast('الصوت غير مدعوم في هذا المتصفح — اقرأ النص المعروض', 'speak'); o.onend && o.onend(); return false; }
-  speechSynthesis.cancel(); const tok = ++speakTok;
-  const u = new SpeechSynthesisUtterance(text); u.lang = 'en-US'; if (TTS.voice) u.voice = TTS.voice;
-  u.rate = o.rate || S.profile.rate || 0.9; u.pitch = TTS.exact ? 1 : ((S.profile.voice || 'male') === 'male' ? 0.7 : 1.15);
-  u.onstart = () => o.onstart && o.onstart();
-  u.onend = u.onerror = () => { if (tok === speakTok) o.onend && o.onend(); };
-  setTimeout(() => speechSynthesis.speak(u), 30);
+  if (!TTS.ok) { audioHelp(AUD_INAPP ? 'inapp' : 'unsupported'); o.onend && o.onend(); return false; }
+  const tok = ++speakTok; let fired = false, ended = false;
+  const done = () => { if (ended) return; ended = true; if (tok === speakTok) o.onend && o.onend(); };
+  const busy = speechSynthesis.speaking || speechSynthesis.pending;
+  try { if (busy) speechSynthesis.cancel(); speechSynthesis.resume(); } catch (e) {}
+  if (!TTS.voice) pickVoice();
+  const chunks = ttsChunks(text); liveUtt.length = 0;
+  const us = chunks.map((c, i) => {
+    const u = new SpeechSynthesisUtterance(c); u.lang = (TTS.voice && TTS.voice.lang) ? TTS.voice.lang.replace('_', '-') : 'en-US'; if (TTS.voice) u.voice = TTS.voice;
+    u.rate = o.rate || (S.profile && S.profile.rate) || 0.9; u.pitch = TTS.exact ? 1 : ((S.profile.voice || 'male') === 'male' ? 0.7 : 1.15); u.volume = 1;
+    u.onstart = () => { if (!fired) { fired = true; TTS.started = true; o.onstart && o.onstart(); } };
+    u.onend = () => { if (i === chunks.length - 1) done(); };
+    u.onerror = ev => { const er = ev && ev.error; done(); if (tok !== speakTok || er === 'interrupted' || er === 'canceled') return; console.warn('[tts] error', er); audioHelp(AUD_INAPP ? 'inapp' : 'failed'); };
+    liveUtt.push(u); return u;
+  });
+  const go = () => { if (tok !== speakTok) return; us.forEach(u => speechSynthesis.speak(u)); };
+  // iOS/Safari: speak synchronously so the tap gesture is kept. Chrome: right after cancel() it can drop the next utterance → tiny delay only in that case.
+  if (busy && !AUD_IOS) setTimeout(go, 60); else go();
+  // Watchdog: if nothing started within 5s, the engine is dead (typical in Android in-app WebViews) → tell the user instead of silence
+  setTimeout(() => { if (tok === speakTok && !fired && !ended) { try { speechSynthesis.cancel(); } catch (e) {} done(); console.warn('[tts] no onstart within 5s'); audioHelp(AUD_INAPP ? 'inapp' : 'failed'); } }, 5000);
+  // iPhone mute switch silences Web Speech without any error → one-time hint on first play
+  if (AUD_IOS && !audioShown.iosTip) { audioShown.iosTip = 1; let seen = 0; try { seen = sessionStorage.getItem('audIosTip'); sessionStorage.setItem('audIosTip', '1'); } catch (e) {} if (!seen) setTimeout(() => toast('ما تسمع؟ تأكد إن زر الصامت مو مفعّل وارفع الصوت', 'speak'), 600); }
   return true;
 }
-function stopSpeak() { if (TTS.ok) { speakTok++; speechSynthesis.cancel(); } }
+function stopSpeak() { if (TTS.ok) { speakTok++; try { speechSynthesis.cancel(); } catch (e) {} } }
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+/* Speech-recognition error → clear Arabic message (used by the 3 mic buttons) */
+function recErr(ev) {
+  const er = ev && ev.error; console.warn('[stt] error', er);
+  if (er === 'no-speech') return toast('ما سمعت شي — قرّب الجوال وتكلّم بوضوح', 'mic');
+  if (er === 'aborted') return;
+  if (er === 'network') return toast('التعرف على الصوت يحتاج اتصال إنترنت', 'mic');
+  audioHelp('mic');
+}
+function recStart(r) { stopSpeak(); try { r.start(); return true; } catch (e) { recErr({ error: 'start-failed' }); return false; } }
 const sayBtn = (t, cls = '') => `<button class="icon-btn ${cls}" data-say="${esc(t)}" aria-label="استمع للنطق: ${esc(t)}" title="استمع للنطق">${ic('sound')}</button>`;
 document.addEventListener('click', e => { const b = e.target.closest('[data-say]'); if (b) { e.stopPropagation(); speak(b.dataset.say); } });
+/* In-app browser banner (once per session): most webviews lack working speech */
+if (AUD_INAPP) window.addEventListener('load', () => { try { if (sessionStorage.getItem('audInapp')) return; sessionStorage.setItem('audInapp', '1'); } catch (e) {} setTimeout(() => audioHelp('inapp'), 800); });
+/* ===== AUDIO-FIX END ===== */
 
 /* ---------- ui helpers ---------- */
 function toast(msg, icon = 'star') { const t = document.createElement('div'); t.className = 'toast'; t.innerHTML = (typeof ic === 'function' ? ic(icon) : '') + '<span>' + esc(msg) + '</span>'; $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3400); }
@@ -2707,7 +2773,7 @@ BASICS_PAGES.alphabet = function (pg) {
     const a = ALPHA[cur], k = b.dataset.p, nm = a[1] === a[0] ? a[0] : a[1], out = $('#arep', pg);
     if (k === 'name') speak(nm, { rate: .8 }); else if (k === 'slow') slow(nm); else if (k === 'word') speak(a[3], { rate: .8 }); else if (k === 'wslow') slow(a[3]);
     else if (k === 'rep') { out.textContent = 'استمع…'; speak(nm, { rate: .55, onend: () => { out.innerHTML = '<b>الآن كرّر أنت</b> ← ثم اسمعها مرة ثانية للمقارنة'; setTimeout(() => speak(a[3], { rate: .55, onend: () => { out.innerHTML = '<b>كرّر الكلمة</b> بنفس الإيقاع.'; } }), 2800); } }); }
-    else if (k === 'mic') { const r = new SR(); r.lang = 'en-US'; r.onresult = ev => { const heard = ev.results[0][0].transcript, sc = wordMatch(a[3], heard); out.innerHTML = `سمعتُ: <b class="en">${esc(heard)}</b> — ${sc >= 80 ? '✓ نطق واضح' : 'حاول مرة ثانية ببطء'}`; logAnswer('speaking', 'alpha', sc >= 80); }; r.onerror = () => toast('تعذّر التسجيل. تأكد من إذن الميكروفون', 'mic'); r.start(); out.textContent = 'تحدّث الآن: ' + a[3]; }
+    else if (k === 'mic') { const r = new SR(); r.lang = 'en-US'; r.onresult = ev => { const heard = ev.results[0][0].transcript, sc = wordMatch(a[3], heard); out.innerHTML = `سمعتُ: <b class="en">${esc(heard)}</b> — ${sc >= 80 ? '✓ نطق واضح' : 'حاول مرة ثانية ببطء'}`; logAnswer('speaking', 'alpha', sc >= 80); }; r.onerror = recErr; if (!recStart(r)) return; out.textContent = 'تحدّث الآن: ' + a[3]; }
   });
   show(0, true);
 };
@@ -2835,7 +2901,7 @@ function speakTest(v) {
     if (i >= PLACE_SPEAK.length) { const p = Math.round(sum(scores) / scores.length); S.speakTest = { ts: Date.now(), pct: p, mode: SR ? 'auto' : 'self' }; S.tests.push({ ts: Date.now(), type: 'speaking', score: p, level: '' }); save(); m.body.innerHTML = `<div class="score-card"><div class="ring" style="--v:${p}"><b>${p}%</b></div><h2>نتيجة تقديرية</h2><p class="ink2">${SR ? 'قُدِّرت بمقارنة ما سمعه المتصفح بالجملة. هي تقريبية وقد تتأثر بالميكروفون واللكنة.' : 'قيّمت نفسك بنفسك لعدم دعم التعرف على الصوت.'}</p></div><div class="row" style="justify-content:center"><button class="btn pri" data-close>إغلاق</button></div>`; return; }
     const t = PLACE_SPEAK[i];
     m.body.innerHTML = `<div class="prompt" style="font-size:1.3rem" dir="ltr">${t} ${sayBtn(t)}</div><div class="small ink2">اقرأ الجملة بصوت واضح.</div><div id="spr"></div><div class="row">${SR ? `<button class="btn pri" id="rec">${ic('mic')} سجّل</button>` : ['لم أستطع|1', 'بصعوبة|2', 'جيد|3', 'بسهولة|4'].map(x => `<button class="btn" data-sc="${x.split('|')[1]}">${x.split('|')[0]}</button>`).join('')}</div>`;
-    if (SR) $('#rec', m.body).onclick = () => { const r = new SR(); r.lang = 'en-US'; r.onresult = e => { const heard = e.results[0][0].transcript; const sc = wordMatch(t, heard); scores.push(sc); $('#spr', m.body).innerHTML = `<div class="note info">${ic('speak')}<div>سمعتُ: <b class="en">${esc(heard)}</b> — ${sc}%</div></div>`; setTimeout(() => { i++; step(); }, 1600); }; r.onerror = () => { toast('تعذّر التسجيل: تأكد من إذن الميكروفون', 'mic'); }; r.start(); toast('تحدّث الآن…', 'mic'); };
+    if (SR) $('#rec', m.body).onclick = () => { const r = new SR(); r.lang = 'en-US'; r.onresult = e => { const heard = e.results[0][0].transcript; const sc = wordMatch(t, heard); scores.push(sc); $('#spr', m.body).innerHTML = `<div class="note info">${ic('speak')}<div>سمعتُ: <b class="en">${esc(heard)}</b> — ${sc}%</div></div>`; setTimeout(() => { i++; step(); }, 1600); }; r.onerror = recErr; if (!recStart(r)) return; toast('تحدّث الآن…', 'mic'); };
     else on(m.body, 'click', '[data-sc]', (e, b) => { scores.push(+b.dataset.sc * 25); i++; step(); });
   };
   step();
@@ -2954,7 +3020,7 @@ function viewListen(v) {
 
 function viewSpeak(v) {
   v.innerHTML = `<div class="page-head"><div><h1>المحادثة</h1><p>استمع، كرّر، ثم قيّم نفسك${SR ? ' أو دع المتصفح يقدّر نطقك (تقدير تقريبي)' : ''}.</p></div></div>${SR ? '' : `<div class="note">${ic('mic')}<div>التعرف على الصوت غير مدعوم هنا، لذلك سنعتمد على التقييم الذاتي.</div></div>`}<div class="grid g2">${SPEAKING.map((g, gi) => `<div class="card col"><div class="row"><div style="font-size:34px">${ic(g.icon)}</div><h3 style="margin:0">${g.g}</h3></div>${g.items.map((it, i) => `<div class="ex-row" data-k="${gi}-${i}"><div style="flex:1"><div class="en">${esc(it[0])}</div><div class="ar">${esc(it[1])}</div><div class="small" data-res></div></div>${sayBtn(it[0])}${SR ? `<button class="icon-btn" data-rec="${gi}-${i}" aria-label="سجّل">${ic('mic')}</button>` : ''}</div>`).join('')}</div>`).join('')}</div>`;
-  on(v, 'click', '[data-rec]', (e, b) => { const [g, i] = b.dataset.rec.split('-').map(Number), t = SPEAKING[g].items[i][0], row = b.closest('.ex-row'); const r = new SR(); r.lang = 'en-US'; r.onresult = ev => { const heard = ev.results[0][0].transcript, sc = wordMatch(t, heard); row.querySelector('[data-res]').innerHTML = `سمعتُ: <b class="en">${esc(heard)}</b> — ${sc >= 80 ? '✓ ممتاز' : sc >= 50 ? 'جيد، حاول مجددًا' : 'أعد المحاولة'} (${sc}%)`; logAnswer('speaking', null, sc >= 70); }; r.onerror = () => toast('تعذّر التسجيل. تأكد من إذن الميكروفون', 'mic'); r.start(); toast('تحدّث الآن…', 'mic'); });
+  on(v, 'click', '[data-rec]', (e, b) => { const [g, i] = b.dataset.rec.split('-').map(Number), t = SPEAKING[g].items[i][0], row = b.closest('.ex-row'); const r = new SR(); r.lang = 'en-US'; r.onresult = ev => { const heard = ev.results[0][0].transcript, sc = wordMatch(t, heard); row.querySelector('[data-res]').innerHTML = `سمعتُ: <b class="en">${esc(heard)}</b> — ${sc >= 80 ? '✓ ممتاز' : sc >= 50 ? 'جيد، حاول مجددًا' : 'أعد المحاولة'} (${sc}%)`; logAnswer('speaking', null, sc >= 70); }; r.onerror = recErr; if (!recStart(r)) return; toast('تحدّث الآن…', 'mic'); });
   if (!SR) on(v, 'click', '[data-say]', (e, b) => { const row = b.closest('.ex-row'); const res = row.querySelector('[data-res]'); if (res && !res.innerHTML) res.innerHTML = `كررتها؟ <button class="btn sm" data-sc="1">نعم ✓</button> <button class="btn sm" data-sc="0">أحتاج تكرارًا</button>`; });
   if (!SR) on(v, 'click', '[data-sc]', (e, b) => { logAnswer('speaking', null, b.dataset.sc === '1'); b.closest('[data-res]').innerHTML = b.dataset.sc === '1' ? '✓ أحسنت' : 'كرّرها بصوت أبطأ'; });
 }
